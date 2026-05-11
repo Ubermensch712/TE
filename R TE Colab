@@ -1,0 +1,110 @@
+#primer codigo que corremos para instalar la libreria en colab
+import os
+print("Instalando RTransferEntropy en el servidor de Google... esto toma un minuto.")
+os.system("Rscript -e 'install.packages(\"RTransferEntropy\", repos=\"http://cran.us.r-project.org\")'")
+print("Instalación completada.")
+
+#luego presionamos codigo dentro del mismo notebbok de drive en colab y ejecutamos
+import numpy as np
+import pandas as pd
+from rpy2.robjects import r, pandas2ri
+from rpy2.robjects.packages import importr
+import rpy2.robjects as robjects
+
+# Activamos la integración entre Python y R
+pandas2ri.activate()
+rte = importr('RTransferEntropy')
+
+# ==========================================================
+# CLASE DE GENERACIÓN DE DATOS (Sistemas Papana)
+# ==========================================================
+class GeneradorSistemas:
+    @staticmethod
+    def sistema_2(n, burn_in=1000):
+        total_n = n + burn_in
+        x1, x2, x3 = np.zeros(total_n), np.zeros(total_n), np.zeros(total_n)
+        e = np.random.randn(3, total_n)
+        for t in range(2, total_n):
+            x1[t] = 0.7 * x1[t-1] + e[0, t]
+            x2[t] = 0.3 * x2[t-1] + 0.5 * x2[t-2] * x1[t-1] + e[1, t]
+            x3[t] = 0.3 * x3[t-1] + 0.5 * x3[t-2] * x1[t-1] + e[2, t]
+        return x1[burn_in:], x2[burn_in:], x3[burn_in:]
+
+    @staticmethod
+    def generar_igarch(n, a0=0.2, a1=0.9, b1=0.1):
+        z, s2 = np.zeros(n), np.zeros(n)
+        err = np.random.randn(n)
+        s2[0] = a0
+        for t in range(1, n):
+            s2[t] = a0 + a1 * (z[t-1]**2) + b1 * s2[t-1]
+            z[t] = np.sqrt(s2[t]) * err[t]
+        return z
+
+    @classmethod
+    def sistema_8(cls, n):
+        x1, x2, x3 = cls.sistema_2(n)
+        y1 = x1 + cls.generar_igarch(n)
+        y2 = x2 + cls.generar_igarch(n)
+        y3 = x3 + cls.generar_igarch(n)
+        return y1, y2, y3
+
+# ==========================================================
+# CLASE DE ANÁLISIS (Interfaz con RTransferEntropy)
+# ==========================================================
+class AnalizadorTE:
+    @staticmethod
+    def calcular_te_r(fuente, destino, nboot=40):
+        # Convertimos datos a formato R
+        v_fuente = robjects.FloatVector(fuente)
+        v_destino = robjects.FloatVector(destino)
+        
+        # Llamada a la librería RTransferEntropy 
+        res = rte.transfer_entropy(v_fuente, v_destino, nboot=nboot, quiet=True)
+        
+        # Extraemos la matriz de coeficientes usando el nombre exacto 'coef'
+        matriz_resultados = np.array(res.rx2('coef'))
+        
+        # Extraemos el p-value de la dirección fuente -> destino (fila 0, columna 3)
+        p_val = matriz_resultados[0, 3] 
+        
+        return p_val <= 0.05
+
+# ==========================================================
+# FLUJO PRINCIPAL (Main)
+# ==========================================================
+def main():
+    np.random.seed(123)
+    tamanos = [512, 2048]
+    sistemas_id = [2, 8]
+    direcciones = ["X1->X2", "X2->X1", "X2->X3", "X3->X2", "X1->X3", "X3->X1"]
+    
+    for sid in sistemas_id:
+        print(f"\nCalculando Tabla de TE para SISTEMA {sid}...")
+        resultados = np.zeros((2, 6), dtype=int)
+        
+        for idx, n in enumerate(tamanos):
+            print(f"   Procesando muestra n = {n}")
+            for r_sim in range(1, 101):
+                # Imprimir progreso en pantalla
+                if r_sim % 20 == 0: 
+                    print(f"      Simulación {r_sim}/100...")
+                
+                # Generación de datos
+                v = GeneradorSistemas.sistema_2(n) if sid == 2 else GeneradorSistemas.sistema_8(n)
+                
+                # Pares a evaluar (Fuente, Destino)
+                pares = [(v[0],v[1]), (v[1],v[0]), (v[1],v[2]), (v[2],v[1]), (v[0],v[2]), (v[2],v[0])]
+                
+                for d_idx in range(6):
+                    # Evaluamos si el p-value es significativo (menor o igual a 0.05)
+                    if AnalizadorTE.calcular_te_r(pares[d_idx][0], pares[d_idx][1]):
+                        resultados[idx, d_idx] += 1
+        
+        # Formateo y muestra de la Tabla Final
+        df_final = pd.DataFrame(resultados, columns=direcciones, index=["n=512", "n=2048"])
+        print(f"\n--- RESULTADOS TE (LIBRERÍA R) SISTEMA {sid} ---")
+        print(df_final)
+        print("-" * 60)
+
+if __name__ == "__main__":
+    main()
